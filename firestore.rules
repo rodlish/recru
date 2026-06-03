@@ -1,0 +1,113 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // -------------------------------------------------------------------------
+    // 0. GLOBAL SAFETY NET
+    // -------------------------------------------------------------------------
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // -------------------------------------------------------------------------
+    // HELPER FUNCTIONS
+    // -------------------------------------------------------------------------
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isEmailVerified() {
+      // In development/testing, we might skip this, but for production it's critical
+      return request.auth.token.email_verified == true;
+    }
+
+    function isAdmin() {
+       // Root admin check (hardcoded email for bootstrap)
+       // OR check existence in admins collection
+       return isSignedIn() && (
+         request.auth.token.email == 'e.rodlish@gmail.com' ||
+         exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+       );
+    }
+
+    function isOwner(email) {
+      return isSignedIn() && request.auth.token.email == email;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // -------------------------------------------------------------------------
+    // CANDIDATES COLLECTION
+    // -------------------------------------------------------------------------
+    match /candidates/{candidateId} {
+      function isValidCandidate(candidate) {
+        return candidate.keys().hasAll(['id', 'name', 'email', 'status', 'assignedModules']) &&
+               candidate.id is string && candidate.id.size() <= 128 &&
+               candidate.name is string && candidate.name.size() <= 200 &&
+               candidate.email is string && candidate.email.size() <= 200 &&
+               candidate.status in ['pending', 'in_progress', 'completed'] &&
+               candidate.assignedModules is list;
+      }
+
+      // Allow public get if the visitor knows the sanitized email ID.
+      allow get: if true; 
+      allow list: if isAdmin(); 
+
+      // Admins can create candidates
+      allow create: if isAdmin() && isValidCandidate(incoming());
+
+      // Update: Admins can update anything. 
+      // Candidates can update their own progress.
+      allow update: if (
+        isAdmin() || (
+          existing().isActive != false &&
+          existing().status != 'completed' &&
+          isValidCandidate(incoming()) &&
+          // Identity check: document ID and email must match
+          candidateId == incoming().id &&
+          incoming().email == existing().email &&
+          // Ensure they are only changing what they should
+          incoming().diff(existing()).affectedKeys().hasOnly(['assignedModules', 'status', 'currentModuleId']) &&
+          // Maintain integrity of other fields
+          incoming().name == existing().name &&
+          (!('password' in existing()) || incoming().password == existing().password) &&
+          (!('isActive' in existing()) || incoming().isActive == existing().isActive)
+        )
+      );
+
+      allow delete: if isAdmin();
+    }
+
+    // -------------------------------------------------------------------------
+    // TEST TYPES COLLECTION
+    // -------------------------------------------------------------------------
+    match /testTypes/{testTypeId} {
+      function isValidTestType(testType) {
+        return testType.keys().hasAll(['id', 'name', 'description', 'moduleTemplates']) &&
+               testType.id is string &&
+               testType.name is string &&
+               testType.moduleTemplates is list;
+      }
+
+      allow read: if true;
+      allow write: if isAdmin() && isValidTestType(incoming());
+    }
+
+    // -------------------------------------------------------------------------
+    // ADMINS COLLECTION
+    // -------------------------------------------------------------------------
+    match /admins/{adminId} {
+      allow read: if isAdmin();
+      allow write: if false; // Only manageable via Firebase Console or hardcoded bootstrap
+    }
+  }
+}
